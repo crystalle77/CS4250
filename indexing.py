@@ -3,7 +3,7 @@
 # FILENAME: title of the source file
 # SPECIFICATION: description of the program
 # FOR: CS 4250- Assignment #1
-# TIME SPENT: how long it took you to complete the assignment
+# TIME SPENT: 1 hr because I had the algorithm down which made it easier
 #-----------------------------------------------------------*/
 
 #Importing some Python libraries
