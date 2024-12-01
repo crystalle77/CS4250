@@ -1,97 +1,88 @@
-import re
-import math
 from pymongo import MongoClient
-from collections import defaultdict, Counter
-from sklearn.feature_extraction.text import TfidfVectorizer
+import string
+import math
+from collections import Counter
 
 # Connect to MongoDB
-client = MongoClient('mongodb://localhost:27017/')
+client = MongoClient("mongodb://localhost:27017/")  # Update connection string if needed
 db = client.search_engine
-documents_collection = db.documents
 terms_collection = db.terms
+documents_collection = db.documents
 
-# Helper functions
-def preprocess(text):
-    """Lowercase and remove punctuation."""
-    return re.sub(r'[^\w\s]', '', text.lower())
-
-def tokenize(text):
-    """Generate unigrams, bigrams, and trigrams."""
-    tokens = text.split()
-    unigrams = tokens
-    bigrams = [' '.join(tokens[i:i+2]) for i in range(len(tokens)-1)]
-    trigrams = [' '.join(tokens[i:i+3]) for i in range(len(tokens)-2)]
-    return unigrams + bigrams + trigrams
-
-# Step 1: Insert Documents
+# Documents (from Question 3)
 documents = [
     "After the medication, headache and nausea were reported by the patient.",
-    "The medication caused a headache and nausea, but no dizziness was reported.",
+    "The patient reported nausea and dizziness caused by the medication.",
     "Headache and dizziness are common effects of this medication.",
-    "Dizziness and nausea are common side effects reported by the patient after taking this medication."
+    "The medication caused a headache and nausea, but no dizziness was reported."
 ]
 
-documents_collection.delete_many({})
-for i, doc in enumerate(documents, 1):
-    documents_collection.insert_one({"_id": i, "content": preprocess(doc)})
+# Tokenization function
+def tokenize(text):
+    text = text.lower().translate(str.maketrans("", "", string.punctuation))
+    words = text.split()
+    unigrams = words
+    bigrams = [" ".join(words[i:i+2]) for i in range(len(words)-1)]
+    trigrams = [" ".join(words[i:i+3]) for i in range(len(words)-2)]
+    return unigrams + bigrams + trigrams
 
-# Step 2: Build Inverted Index
-terms_collection.delete_many({})
-vocabulary = {}
-inverted_index = defaultdict(list)
+# Create collections
+terms_collection.drop()
+documents_collection.drop()
 
-for doc in documents_collection.find():
-    doc_id = doc['_id']
-    tokens = tokenize(doc['content'])
-    token_counts = Counter(tokens)
-    
-    for term, count in token_counts.items():
-        if term not in vocabulary:
-            vocabulary[term] = len(vocabulary) + 1
-        term_id = vocabulary[term]
-        inverted_index[term].append({"doc_id": doc_id, "tf": count})
+# Populate documents collection
+for i, content in enumerate(documents, start=1):
+    documents_collection.insert_one({"_id": i, "content": content})
 
-for term, docs in inverted_index.items():
-    idf = math.log(len(documents) / len(docs))
-    for doc in docs:
-        doc['tf-idf'] = doc['tf'] * idf
-    terms_collection.insert_one({"_id": vocabulary[term], "term": term, "pos": vocabulary[term], "docs": docs})
+# Build inverted index
+vocab = {}
+for doc_id, content in enumerate(documents, start=1):
+    tokens = tokenize(content)
+    term_freq = Counter(tokens)
+    for term, freq in term_freq.items():
+        if term not in vocab:
+            vocab[term] = len(vocab) + 1
+        pos = vocab[term]
+        tf = 1 + math.log(freq)  # TF calculation
+        idf = math.log(len(documents) / sum(term in tokenize(d) for d in documents))  # IDF calculation
+        tf_idf = tf * idf
+        terms_collection.update_one(
+            {"_id": pos},
+            {"$set": {"pos": pos}, "$push": {"docs": {"doc_id": doc_id, "tf_idf": tf_idf}}},
+            upsert=True
+        )
 
-# Step 3: Rank Documents
-def rank_documents(query):
-    """Rank documents using vector space model."""
-    query_tokens = tokenize(preprocess(query))
-    query_vector = defaultdict(float)
-    
+# Define queries
+queries = [
+    "nausea and dizziness",
+    "effects",
+    "nausea was reported",
+    "dizziness",
+    "the medication"
+]
+
+# Process queries and compute scores
+def compute_scores(query):
+    query_tokens = tokenize(query)
+    scores = Counter()
     for token in query_tokens:
-        if token in vocabulary:
-            term_data = terms_collection.find_one({"term": token})
-            idf = math.log(len(documents) / len(term_data['docs']))
-            query_vector[token] += idf
-    
-    scores = defaultdict(float)
-    
-    for token, q_weight in query_vector.items():
-        term_data = terms_collection.find_one({"term": token})
-        for doc in term_data['docs']:
-            scores[doc['doc_id']] += q_weight * doc['tf-idf']
-    
-    ranked_docs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    return [(documents[doc_id - 1], score) for doc_id, score in ranked_docs]
-
-# Queries
-queries = {
-    "q1": "nausea and dizziness",
-    "q2": "effects",
-    "q3": "nausea was reported",
-    "q4": "dizziness",
-    "q5": "the medication"
-}
+        term = terms_collection.find_one({"_id": vocab.get(token)})
+        if term:
+            for doc in term["docs"]:
+                scores[doc["doc_id"]] += doc["tf_idf"]
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
 # Output results
-for qid, query in queries.items():
-    print(f"Results for Query {qid}: {query}")
-    results = rank_documents(query)
-    for content, score in results:
-        print(f'"{content}", {score:.2f}')
-    print()
+results = {}
+for i, query in enumerate(queries, start=1):
+    scores = compute_scores(query)
+    results[f"q{i}"] = [
+        {"content": documents[doc_id - 1], "score": score}
+        for doc_id, score in scores
+    ]
+
+# Print the results for each query
+for query_id, ranked_docs in results.items():
+    print(f"Results for {query_id}:")
+    for doc in ranked_docs:
+        print(f"Document: {doc['content']}, Score: {doc['score']}")
